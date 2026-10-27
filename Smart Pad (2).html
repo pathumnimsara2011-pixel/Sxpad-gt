@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="si">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Smart Pad</title>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);--bg:#f6f5f1;--fg:#1c1c1a;--card:#fff;--mut:#6b6a64;--acc:#1f6feb;--ok:#1a7f37}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#17171a;--fg:#ecebe6;--card:#222226;--mut:#9a9992;--acc:#5b9dff;--ok:#3fb950}}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,sans-serif;padding:16px}
+h1{font-size:20px;margin:0 0 12px}
+.card{background:var(--card);border-radius:12px;padding:14px;margin-bottom:12px}
+label{display:block;font-size:13px;color:var(--mut);margin:10px 0 4px}
+select,input[type=range],button{width:100%;font-size:16px}
+select,button{padding:10px;border-radius:8px;border:1px solid var(--mut);background:var(--card);color:var(--fg)}
+button.go{background:var(--acc);color:#fff;border:0;font-weight:600}
+#chord{font-size:34px;font-weight:700;text-align:center;margin:6px 0}
+#st{font-size:13px;color:var(--mut);text-align:center}
+</style>
+</head>
+<body>
+<h1>Smart Pad</h1>
+<div class="card">
+  <button class="go" id="start">Start (tap once)</button>
+  <label>MIDI keyboard</label>
+  <select id="dev"></select>
+  <div id="st">Not started</div>
+</div>
+<div class="card">
+  <div id="chord">–</div>
+  <div id="st2" style="text-align:center;font-size:13px;color:var(--mut)">Chord (left hand)</div>
+</div>
+<div class="card">
+  <label>Left-hand zone: notes below <b id="spv">C4 (60)</b> = chord</label>
+  <input type="range" id="split" min="36" max="84" value="60">
+  <label>Min notes for a chord</label>
+  <select id="minn"><option>2</option><option selected>3</option><option>4</option></select>
+  <label>Pad octave</label>
+  <select id="oct"><option value="0">Same</option><option value="12" selected>+1 octave</option><option value="24">+2 octaves</option></select>
+  <label>Pad volume</label>
+  <input type="range" id="vol" min="0" max="100" value="45">
+  <label>Pad brightness</label>
+  <input type="range" id="bri" min="300" max="4000" value="1400">
+  <button id="stop" style="margin-top:12px">Pad off (panic)</button>
+</div>
+<script>
+const N=["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+const nn=m=>N[m%12]+(Math.floor(m/12)-1);
+let ctx,master,filt,voices=[],held=new Set(),buf=[],timer=null,midi=null;
+const $=id=>document.getElementById(id);
+function initAudio(){
+  if(ctx)return;
+  ctx=new (window.AudioContext||window.webkitAudioContext)({latencyHint:"interactive"});
+  master=ctx.createGain();filt=ctx.createBiquadFilter();filt.type="lowpass";
+  filt.frequency.value=+$("bri").value;filt.connect(master);master.connect(ctx.destination);
+  master.gain.value=$("vol").value/100*0.4;
+}
+function release(vs){const t=ctx.currentTime;vs.forEach(v=>{v.g.gain.cancelScheduledValues(t);v.g.gain.setTargetAtTime(0,t,0.35);v.o.forEach(o=>o.stop(t+2.5))})}
+function playChord(notes){
+  initAudio();ctx.resume();
+  release(voices);voices=[];
+  const sh=+$("oct").value,t=ctx.currentTime;
+  notes.forEach(m=>{
+    const f=440*Math.pow(2,(m+sh-69)/12),g=ctx.createGain();
+    g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(0.25,t+0.5);g.connect(filt);
+    const os=[-7,7].map(c=>{const o=ctx.createOscillator();o.type="sawtooth";o.frequency.value=f;o.detune.value=c;o.connect(g);o.start();return o});
+    voices.push({g,o:os});
+  });
+  $("chord").textContent=notes.slice().sort((a,b)=>a-b).map(nn).join(" ");
+}
+function flush(){
+  timer=null;
+  const list=buf.slice();buf=[];
+  if(list.length>=+$("minn").value)playChord([...new Set(list)]);
+  // fewer notes = ignored, previous chord keeps holding
+}
+function onMsg(e){
+  const [s,n,v]=e.data,cmd=s&0xf0;
+  if(cmd===0x90&&v>0&&n<+$("split").value){
+    buf.push(n);
+    if(!timer)timer=setTimeout(flush,70);
+  }
+}
+$("start").onclick=async()=>{
+  initAudio();ctx.resume();
+  if(!navigator.requestMIDIAccess){$("st").textContent="This browser has no MIDI. Open in Chrome.";return}
+  try{midi=await navigator.requestMIDIAccess();}catch(e){$("st").textContent="MIDI permission denied";return}
+  const fill=()=>{
+    const sel=$("dev");sel.innerHTML="";
+    midi.inputs.forEach(i=>{const o=document.createElement("option");o.value=i.id;o.textContent=i.name;sel.appendChild(o)});
+    bind();
+  };
+  const bind=()=>{
+    midi.inputs.forEach(i=>i.onmidimessage=null);
+    const i=midi.inputs.get($("dev").value);
+    if(i){i.onmidimessage=onMsg;$("st").textContent="Connected: "+i.name}
+    else $("st").textContent="No MIDI keyboard found. Plug in via USB.";
+  };
+  midi.onstatechange=fill;$("dev").onchange=bind;fill();
+};
+$("stop").onclick=()=>{if(ctx){release(voices);voices=[]}$("chord").textContent="–"};
+$("split").oninput=e=>$("spv").textContent=nn(+e.target.value)+" ("+e.target.value+")";
+$("vol").oninput=e=>{if(master)master.gain.value=e.target.value/100*0.4};
+$("bri").oninput=e=>{if(filt)filt.frequency.value=+e.target.value};
+</script>
+</body>
+</html>
